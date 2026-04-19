@@ -1,0 +1,347 @@
+import os
+import re
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+_pool: Optional[AsyncConnectionPool] = None
+_initialized: bool = False
+
+
+async def init_pool():
+    """Initialize the async connection pool and run schema migration (once only)."""
+    global _pool, _initialized
+    if _initialized:
+        return
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+    _pool = AsyncConnectionPool(
+        conninfo=database_url,
+        min_size=2,
+        max_size=10,
+        kwargs={"row_factory": dict_row},
+    )
+    await _pool.open()
+    # Run schema on startup — use autocommit for CREATE EXTENSION
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema_sql = f.read()
+    async with _pool.connection() as conn:
+        await conn.set_autocommit(True)
+        await conn.execute(schema_sql)
+        await conn.set_autocommit(False)
+    _initialized = True
+
+
+async def close_pool():
+    """Close the connection pool."""
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+
+
+@asynccontextmanager
+async def get_conn():
+    """Get a connection from the pool."""
+    async with _pool.connection() as conn:
+        yield conn
+
+
+def _normalize_title(title: str) -> str:
+    """Normalize title for dedup: strip whitespace and punctuation."""
+    return re.sub(r"[\s\u3000:：\-—·.。、,，;；!！?？]+", "", title).lower()
+
+
+# --- Project operations ---
+
+async def ensure_project(project_id: str, project_name: Optional[str] = None):
+    """Create project if it doesn't exist."""
+    name = project_name or project_id
+    async with get_conn() as conn:
+        await conn.execute(
+            """INSERT INTO projects (id, name) VALUES (%s, %s)
+               ON CONFLICT (id) DO NOTHING""",
+            (project_id, name),
+        )
+        await conn.commit()
+
+
+async def list_projects() -> list[dict]:
+    """List all projects."""
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "SELECT id, name, description, created_at FROM projects ORDER BY created_at"
+        )
+        return await cur.fetchall()
+
+
+# --- Memory operations ---
+
+async def save_memory(
+    project_id: str,
+    type_: str,
+    title: str,
+    content: str,
+    author: str,
+    module: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    project_name: Optional[str] = None,
+) -> dict:
+    """Save or upsert a memory. Returns {"id": uuid, "action": "created"|"updated"}."""
+    await ensure_project(project_id, project_name)
+    normalized = _normalize_title(title)
+    tags = tags or []
+
+    async with get_conn() as conn:
+        # Check for existing memory with same dedup key
+        cur = await conn.execute(
+            """SELECT id, title, content FROM memories
+               WHERE project_id = %s
+                 AND COALESCE(module, '') = COALESCE(%s, '')
+                 AND type = %s""",
+            (project_id, module, type_),
+        )
+        rows = await cur.fetchall()
+        existing = None
+        for row in rows:
+            if _normalize_title(row["title"]) == normalized:
+                existing = row
+                break
+
+        if existing:
+            # Upsert: save old version, then update
+            await conn.execute(
+                """INSERT INTO memory_versions (memory_id, title, content, author, change_note)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (existing["id"], existing["title"], existing["content"], author, "auto-upsert via save_memory"),
+            )
+            await conn.execute(
+                """UPDATE memories SET title = %s, content = %s, tags = %s,
+                          author = %s, updated_at = now()
+                   WHERE id = %s""",
+                (title, content, tags, author, existing["id"]),
+            )
+            await conn.commit()
+            return {"id": str(existing["id"]), "action": "updated"}
+        else:
+            # Insert new
+            cur = await conn.execute(
+                """INSERT INTO memories (project_id, module, type, title, content, tags, author)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (project_id, module, type_, title, content, tags, author),
+            )
+            row = await cur.fetchone()
+            await conn.commit()
+            return {"id": str(row["id"]), "action": "created"}
+
+
+async def search_memory(
+    project_id: str,
+    query: Optional[str] = None,
+    module: Optional[str] = None,
+    type_: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Search memories with optional filters."""
+    conditions = ["project_id = %s"]
+    params: list = [project_id]
+
+    if module is not None:
+        conditions.append("module = %s")
+        params.append(module)
+    if type_ is not None:
+        conditions.append("type = %s")
+        params.append(type_)
+    if tags:
+        conditions.append("tags @> %s")
+        params.append(tags)
+    if query:
+        conditions.append("(title ILIKE %s OR content ILIKE %s)")
+        like_pattern = f"%{query}%"
+        params.extend([like_pattern, like_pattern])
+
+    where = " AND ".join(conditions)
+    params.append(limit)
+
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            f"""SELECT id, project_id, module, type, title, content, tags, author,
+                       created_at, updated_at, access_count, last_accessed_at
+                FROM memories WHERE {where}
+                ORDER BY updated_at DESC LIMIT %s""",
+            params,
+        )
+        rows = await cur.fetchall()
+        # Update access tracking
+        if rows:
+            ids = [row["id"] for row in rows]
+            await conn.execute(
+                """UPDATE memories SET access_count = access_count + 1,
+                          last_accessed_at = now()
+                   WHERE id = ANY(%s)""",
+                (ids,),
+            )
+            await conn.commit()
+        return rows
+
+
+async def get_module_context(
+    project_id: str,
+    module: Optional[str] = None,
+) -> dict[str, list[dict]]:
+    """Load all memories for a project, optionally filtered by module, grouped by type.
+    When module is omitted, returns ALL memories (project-level + all modules).
+    When module is provided, returns only that module's memories."""
+    if module is not None:
+        condition = "project_id = %s AND module = %s"
+        params = (project_id, module)
+    else:
+        condition = "project_id = %s"
+        params = (project_id,)
+
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            f"""SELECT id, project_id, module, type, title, content, tags, author,
+                       created_at, updated_at, access_count, last_accessed_at
+                FROM memories WHERE {condition}
+                ORDER BY type, updated_at DESC""",
+            params,
+        )
+        rows = await cur.fetchall()
+        # Update access tracking
+        if rows:
+            ids = [row["id"] for row in rows]
+            await conn.execute(
+                """UPDATE memories SET access_count = access_count + 1,
+                          last_accessed_at = now()
+                   WHERE id = ANY(%s)""",
+                (ids,),
+            )
+            await conn.commit()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        t = row["type"]
+        if t not in grouped:
+            grouped[t] = []
+        grouped[t].append(row)
+    return grouped
+
+
+async def count_memories(project_id: str) -> dict:
+    """Count memories for a project, grouped by type."""
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            """SELECT type, COUNT(*) as count FROM memories
+               WHERE project_id = %s GROUP BY type""",
+            (project_id,),
+        )
+        rows = await cur.fetchall()
+        cur2 = await conn.execute(
+            "SELECT COUNT(*) as total FROM memories WHERE project_id = %s",
+            (project_id,),
+        )
+        total_row = await cur2.fetchone()
+    by_type = {row["type"]: row["count"] for row in rows}
+    return {"total": total_row["total"], "by_type": by_type}
+
+
+async def get_memory_titles(
+    project_id: str,
+    module: Optional[str] = None,
+) -> list[dict]:
+    """Get lightweight memory list (titles only, no content) for a project.
+    When module is omitted, returns all. When provided, filters by module."""
+    if module is not None:
+        condition = "project_id = %s AND module = %s"
+        params = (project_id, module)
+    else:
+        condition = "project_id = %s"
+        params = (project_id,)
+
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            f"""SELECT id, module, type, title, tags, author,
+                       created_at, updated_at, access_count, last_accessed_at
+                FROM memories WHERE {condition}
+                ORDER BY type, updated_at DESC""",
+            params,
+        )
+        return await cur.fetchall()
+
+
+async def update_memory(
+    memory_id: str,
+    author: str,
+    content: Optional[str] = None,
+    title: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    change_note: Optional[str] = None,
+) -> Optional[dict]:
+    """Update a memory, saving old version first. Returns updated memory or None."""
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "SELECT * FROM memories WHERE id = %s", (memory_id,)
+        )
+        existing = await cur.fetchone()
+        if not existing:
+            return None
+
+        # Save old version
+        await conn.execute(
+            """INSERT INTO memory_versions (memory_id, title, content, author, change_note)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (memory_id, existing["title"], existing["content"], author, change_note),
+        )
+
+        # Build update
+        sets = ["updated_at = now()"]
+        params: list = []
+        if content is not None:
+            sets.append("content = %s")
+            params.append(content)
+        if title is not None:
+            sets.append("title = %s")
+            params.append(title)
+        if tags is not None:
+            sets.append("tags = %s")
+            params.append(tags)
+        sets.append("author = %s")
+        params.append(author)
+        params.append(memory_id)
+
+        cur = await conn.execute(
+            f"""UPDATE memories SET {', '.join(sets)} WHERE id = %s
+                RETURNING id, project_id, module, type, title, content, tags, author, created_at, updated_at, access_count, last_accessed_at""",
+            params,
+        )
+        result = await cur.fetchone()
+        await conn.commit()
+        return result
+
+
+async def delete_memory(memory_id: str, author: str) -> bool:
+    """Delete a memory. Returns True if deleted, False if not found."""
+    async with get_conn() as conn:
+        # Save final version before deletion
+        cur = await conn.execute(
+            "SELECT title, content FROM memories WHERE id = %s", (memory_id,)
+        )
+        existing = await cur.fetchone()
+        if not existing:
+            return False
+
+        await conn.execute(
+            """INSERT INTO memory_versions (memory_id, title, content, author, change_note)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (memory_id, existing["title"], existing["content"], author, "deleted"),
+        )
+        await conn.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
+        await conn.commit()
+        return True
