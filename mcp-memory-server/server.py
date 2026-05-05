@@ -26,7 +26,7 @@ mcp = FastMCP(
     json_response=True,
     lifespan=app_lifespan,
     transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
+        enable_dns_rebinding_protection=os.environ.get("MCP_DNS_REBINDING_PROTECTION", "true").lower() == "true",
     ),
 )
 
