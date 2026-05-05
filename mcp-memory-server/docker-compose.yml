@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_memory
+      POSTGRES_USER: memory_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-your_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    health:
+      test: ["CMD-SHELL", "pg_isready -U memory_admin -d ai_memory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  memory-server:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://memory_admin:${POSTGRES_PASSWORD:-your_password}@db:5432/ai_memory
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8100"
+    ports:
+      - "8100:8100"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
