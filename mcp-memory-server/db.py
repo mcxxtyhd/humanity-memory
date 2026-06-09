@@ -79,6 +79,16 @@ async def list_projects() -> list[dict]:
         return await cur.fetchall()
 
 
+async def get_project(project_id: str) -> Optional[dict]:
+    """Get one project by id."""
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "SELECT id, name, description, created_at FROM projects WHERE id = %s",
+            (project_id,),
+        )
+        return await cur.fetchone()
+
+
 # --- Memory operations ---
 
 async def save_memory(
@@ -148,7 +158,95 @@ async def search_memory(
     tags: Optional[list[str]] = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Search memories with optional filters."""
+    """Search memories with optional filters.
+
+    Uses pg_trgm similarity for fuzzy matching and relevance sorting when a
+    query is provided, while keeping ILIKE so exact substring matches stay fast
+    and predictable for short Chinese queries.
+    """
+    conditions = ["project_id = %s"]
+    filter_params: list = [project_id]
+    rank_params: list = []
+
+    if module is not None:
+        conditions.append("module = %s")
+        filter_params.append(module)
+    if type_ is not None:
+        conditions.append("type = %s")
+        filter_params.append(type_)
+    if tags:
+        conditions.append("tags @> %s")
+        filter_params.append(tags)
+    if query:
+        terms = [term for term in re.split(r"\s+", query.strip()) if term]
+        term_conditions = []
+        rank_parts = []
+        for term in terms:
+            like_pattern = f"%{term}%"
+            term_conditions.append(
+                "(title ILIKE %s OR content ILIKE %s "
+                "OR title %% %s "
+                "OR content %% %s)"
+            )
+            filter_params.extend([
+                like_pattern,
+                like_pattern,
+                term,
+                term,
+            ])
+            rank_parts.append(
+                "GREATEST(similarity(title, %s) * 2.0, similarity(content, %s))"
+            )
+            rank_params.extend([term, term])
+        if term_conditions:
+            conditions.append(f"({' OR '.join(term_conditions)})")
+            relevance_sql = " + ".join(rank_parts)
+            order_sql = "relevance_score DESC, updated_at DESC"
+        else:
+            relevance_sql = "0.0"
+            order_sql = "updated_at DESC"
+    else:
+        relevance_sql = "0.0"
+        order_sql = "updated_at DESC"
+
+    where = " AND ".join(conditions)
+    params = rank_params + filter_params + [limit]
+
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            f"""SELECT id, project_id, module, type, title, content, tags, author,
+                       created_at, updated_at, access_count, last_accessed_at,
+                       {relevance_sql} AS relevance_score
+                FROM memories WHERE {where}
+                ORDER BY {order_sql} LIMIT %s""",
+            params,
+        )
+        rows = await cur.fetchall()
+        # Update access tracking
+        if rows:
+            ids = [row["id"] for row in rows]
+            await conn.execute(
+                """UPDATE memories SET access_count = access_count + 1,
+                          last_accessed_at = now()
+                   WHERE id = ANY(%s)""",
+                (ids,),
+            )
+            await conn.commit()
+        return rows
+
+
+async def get_memory_index(
+    project_id: str,
+    module: Optional[str] = None,
+    type_: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """Get a lightweight memory index without full content.
+
+    The summary is a short content preview so callers can understand vague user
+    references before deciding which full memories to load.
+    """
     conditions = ["project_id = %s"]
     params: list = [project_id]
 
@@ -161,24 +259,64 @@ async def search_memory(
     if tags:
         conditions.append("tags @> %s")
         params.append(tags)
-    if query:
-        conditions.append("(title ILIKE %s OR content ILIKE %s)")
-        like_pattern = f"%{query}%"
-        params.extend([like_pattern, like_pattern])
+
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT %s"
+        params.append(limit)
 
     where = " AND ".join(conditions)
-    params.append(limit)
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            f"""SELECT id, project_id, module, type, title,
+                       CASE
+                           WHEN length(content) > 240 THEN left(content, 240) || '...'
+                           ELSE content
+                       END AS summary,
+                       tags, author, created_at, updated_at, access_count, last_accessed_at
+                FROM memories WHERE {where}
+                ORDER BY updated_at DESC {limit_sql}""",
+            params,
+        )
+        return await cur.fetchall()
+
+
+async def get_memory(project_id: str, memory_id: str) -> Optional[dict]:
+    """Get one full memory by id within a project."""
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            """SELECT id, project_id, module, type, title, content, tags, author,
+                      created_at, updated_at, access_count, last_accessed_at
+               FROM memories WHERE project_id = %s AND id = %s""",
+            (project_id, memory_id),
+        )
+        row = await cur.fetchone()
+        if row:
+            await conn.execute(
+                """UPDATE memories SET access_count = access_count + 1,
+                          last_accessed_at = now()
+                   WHERE id = %s""",
+                (memory_id,),
+            )
+            await conn.commit()
+        return row
+
+
+async def get_memories(project_id: str, memory_ids: list[str]) -> list[dict]:
+    """Get full memories by ids within a project."""
+    if not memory_ids:
+        return []
 
     async with get_conn() as conn:
         cur = await conn.execute(
-            f"""SELECT id, project_id, module, type, title, content, tags, author,
-                       created_at, updated_at, access_count, last_accessed_at
-                FROM memories WHERE {where}
-                ORDER BY updated_at DESC LIMIT %s""",
-            params,
+            """SELECT id, project_id, module, type, title, content, tags, author,
+                      created_at, updated_at, access_count, last_accessed_at
+               FROM memories
+               WHERE project_id = %s AND id = ANY(%s::uuid[])
+               ORDER BY updated_at DESC""",
+            (project_id, memory_ids),
         )
         rows = await cur.fetchall()
-        # Update access tracking
         if rows:
             ids = [row["id"] for row in rows]
             await conn.execute(

@@ -1,33 +1,38 @@
 services:
-  db:
+  postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ai_memory
       POSTGRES_USER: memory_admin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-your_password}
+      POSTGRES_PASSWORD: Mem0ry2024!
+      POSTGRES_DB: ai_memory
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    ports:
-      - "5432:5432"
-    health:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memory_admin -d ai_memory"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - mcp-net
 
-  memory-server:
+  mcp-server:
     build: .
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://memory_admin:${POSTGRES_PASSWORD:-your_password}@db:5432/ai_memory
-      MCP_HOST: "0.0.0.0"
-      MCP_PORT: "8100"
+      DATABASE_URL: postgresql://memory_admin:Mem0ry2024!@postgres:5432/ai_memory
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8100
+      MCP_DNS_REBINDING_PROTECTION: "false"
     ports:
       - "8100:8100"
-    restart: unless-stopped
+    networks:
+      - mcp-net
+
+networks:
+  mcp-net:
 
 volumes:
-  postgres_data:
+  pgdata:

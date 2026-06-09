@@ -49,16 +49,11 @@ user_invocable: true
 1. **评估记忆规模**：调用 `count_memories(project_id=当前项目)` 获取记忆总数和分类统计
 
 2. **加载记忆**：根据记忆规模选择策略：
-   - 记忆 ≤ 30 条：调用 `get_module_context(project_id=当前项目)` 加载全文，内部消化，不向用户展示
-   - 记忆 > 30 条：调用 `get_memory_titles(project_id=当前项目)` 只加载标题列表，需要某条记忆的详情时再通过 `search_memory` 按需读取全文
+   - 记忆 ≤ 30 条：调用 `get_module_context(project_id=当前项目, include_all=true)` 加载全文，内部消化，不向用户展示
+   - 记忆 > 30 条：调用 `get_memory_index(project_id=当前项目)` 获取轻量索引（标题+摘要），内部消化，不向用户展示。需要某条记忆的详情时再通过 `get_memory` 或 `search_memory` 按需读取全文
    - 向用户简要汇报："已加载 N 条项目记忆（decision: X, pitfall: Y, ...）"
 
-3. **扫描 shared 项目**：调用 `list_projects` 查看有哪些 shared- 开头的项目
-   - 根据当前项目的技术栈和上下文，判断哪些 shared 项目可能相关
-   - **不立即加载内容**，只记住有哪些可用
-   - 后续开发中遇到相关领域问题时，再按需调用 `search_memory(project_id="shared-xxx", query=...)` 搜索
-
-4. **检查是否需要睡眠整理**：根据步骤 1 的统计结果判断
+3. **检查是否需要睡眠整理**：根据步骤 1 的统计结果判断
    - 如果项目记忆总数 > 100 条，提醒用户："项目记忆较多（N条），建议执行一次记忆整理。要现在整理吗？"
    - 用户同意 → 执行阶段四
    - 用户拒绝 → 正常开始工作
@@ -109,7 +104,7 @@ user_invocable: true
 
 ### 整理流程
 
-1. **加载全量记忆**：调用 `get_module_context(project_id=当前项目)` 获取所有记忆（包括所有模块）
+1. **加载全量记忆**：调用 `get_module_context(project_id=当前项目, include_all=true)` 获取所有记忆（包括所有模块）
 
 2. **逐条审视**，执行以下操作：
 

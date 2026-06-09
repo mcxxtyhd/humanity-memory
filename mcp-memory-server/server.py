@@ -94,11 +94,11 @@ async def search_memory(
     tags: Optional[list[str]] = None,
     limit: int = 10,
 ) -> str:
-    """Search project memories with keyword and filters.
+    """Search project memories with keyword and filters, sorted by relevance when query is provided.
 
     Args:
         project_id: Project identifier
-        query: Search keyword (Chinese supported via trigram index)
+        query: Search keyword (Chinese supported via trigram fuzzy matching)
         module: Filter by module name
         type: Filter by memory type
         tags: Filter by tags (all must match)
@@ -119,15 +119,26 @@ async def search_memory(
 async def get_module_context(
     project_id: str,
     module: Optional[str] = None,
+    include_all: bool = False,
 ) -> str:
     """Load all memories for a module or project-level, grouped by type.
     Call this at session start to load working context.
-    When module is omitted, returns ALL memories (project-level + all modules).
+    When module is omitted, include_all must be true to load ALL full memories.
 
     Args:
         project_id: Project identifier
         module: Module name. Omit for all project memories.
+        include_all: Explicitly allow full-project content loading. Use only for memory cleanup/audit.
     """
+    if module is None and not include_all:
+        return json.dumps(
+            {
+                "error": "Full-project memory content loading requires include_all=true. "
+                         "Use get_memory_index for startup context, then get_memory/get_memories for details."
+            },
+            ensure_ascii=False,
+        )
+
     grouped = await db.get_module_context(
         project_id=project_id,
         module=module,
@@ -165,6 +176,62 @@ async def get_memory_titles(
         module=module,
     )
     return json.dumps(_clean(results), ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_memory_index(
+    project_id: str,
+    module: Optional[str] = None,
+    type: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: Optional[int] = None,
+) -> str:
+    """Get a lightweight full-project memory index without full content.
+
+    Use this at session start so vague user references can be resolved against
+    titles, modules, tags, dates, and short summaries before loading details.
+
+    Args:
+        project_id: Project identifier
+        module: Optional module filter
+        type: Optional memory type filter
+        tags: Optional tags filter (all must match)
+        limit: Optional max results. Omit to return the full lightweight index.
+    """
+    results = await db.get_memory_index(
+        project_id=project_id,
+        module=module,
+        type_=type,
+        tags=tags,
+        limit=limit,
+    )
+    return json.dumps(_clean(results), ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_memory(project_id: str, memory_id: str) -> str:
+    """Get one full memory by id.
+
+    Args:
+        project_id: Project identifier
+        memory_id: Memory UUID
+    """
+    memory = await db.get_memory(project_id=project_id, memory_id=memory_id)
+    if memory is None:
+        return json.dumps({"error": f"Memory {memory_id} not found in project {project_id}"}, ensure_ascii=False)
+    return json.dumps(_clean(memory), ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_memories(project_id: str, memory_ids: list[str]) -> str:
+    """Get multiple full memories by id.
+
+    Args:
+        project_id: Project identifier
+        memory_ids: Memory UUIDs
+    """
+    memories = await db.get_memories(project_id=project_id, memory_ids=memory_ids)
+    return json.dumps(_clean(memories), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -221,6 +288,19 @@ async def list_projects() -> str:
     """List all registered projects."""
     projects = await db.list_projects()
     return json.dumps(_clean(projects), ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_project(project_id: str) -> str:
+    """Get one registered project by id.
+
+    Args:
+        project_id: Project identifier
+    """
+    project = await db.get_project(project_id=project_id)
+    if project is None:
+        return json.dumps({"error": f"Project {project_id} not found"}, ensure_ascii=False)
+    return json.dumps(_clean(project), ensure_ascii=False)
 
 
 if __name__ == "__main__":
