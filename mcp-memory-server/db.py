@@ -56,6 +56,33 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"[\s\u3000:：\-—·.。、,，;；!！?？]+", "", title).lower()
 
 
+def _extract_summary(content: Optional[str], max_len: int = 120) -> str:
+    """Extract a one-line structural preview from markdown content.
+
+    Replaces blind ``left(content, N)`` truncation, which grabbed the leading
+    ``#`` heading (duplicating the title) and cut mid-sentence markdown. Here we
+    skip headings and prefer the first blockquote line (conventionally the
+    'why'/context in this project's memories), falling back to the first prose
+    line. Capped at ``max_len``.
+    """
+    if not content:
+        return ""
+    summary = ""
+    for line in content.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith(">"):
+            s = s.lstrip(">").strip()
+        if s:
+            summary = s
+            break
+    summary = re.sub(r"^[-*+]\s+", "", summary)
+    if len(summary) > max_len:
+        summary = summary[:max_len].rstrip() + "..."
+    return summary
+
+
 # --- Project operations ---
 
 async def ensure_project(project_id: str, project_name: Optional[str] = None):
@@ -244,8 +271,13 @@ async def get_memory_index(
 ) -> list[dict]:
     """Get a lightweight memory index without full content.
 
-    The summary is a short content preview so callers can understand vague user
-    references before deciding which full memories to load.
+    Returns only id/module/type/title/tags/created_at plus a short structural
+    `summary` (first blockquote or first prose line, ~120 chars) extracted from
+    content -- NOT a blind left(content,N) truncation, which duplicated the
+    title heading and cut mid-sentence markdown. Redundant fields (project_id,
+    author, updated_at, access_count, last_accessed_at) are omitted to keep the
+    payload small; full metadata is available via get_memory_titles, full
+    content via get_memory/get_memories.
     """
     conditions = ["project_id = %s"]
     params: list = [project_id]
@@ -268,17 +300,16 @@ async def get_memory_index(
     where = " AND ".join(conditions)
     async with get_conn() as conn:
         cur = await conn.execute(
-            f"""SELECT id, project_id, module, type, title,
-                       CASE
-                           WHEN length(content) > 240 THEN left(content, 240) || '...'
-                           ELSE content
-                       END AS summary,
-                       tags, author, created_at, updated_at, access_count, last_accessed_at
+            f"""SELECT id, module, type, title, tags, created_at,
+                       left(content, 800) AS _content_head
                 FROM memories WHERE {where}
                 ORDER BY updated_at DESC {limit_sql}""",
             params,
         )
-        return await cur.fetchall()
+        rows = await cur.fetchall()
+    for row in rows:
+        row["summary"] = _extract_summary(row.pop("_content_head", ""))
+    return rows
 
 
 async def get_memory(project_id: str, memory_id: str) -> Optional[dict]:

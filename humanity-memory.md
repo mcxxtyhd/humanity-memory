@@ -4,13 +4,13 @@ description: 通用项目记忆管理系统。自动采集、召回、整理项�
 user_invocable: true
 ---
 
-# Humanity Memory — 项目记忆管理系统
+# Humanity Memory - 项目记忆管理系统
 
 你拥有一个共享记忆系统（MCP Memory Server），用于跨会话、跨工程师持久化项目知识。像人脑一样运作：自动记住重要的事，需要时自动回忆，定期整理遗忘无用的。
 
 **与 CC 内置 auto memory 的分工：**
-- 项目记忆（技术决策、踩坑、进展等）→ 走 MCP Memory Server，团队共享
-- 个人偏好（用户习惯、交互风格等）→ 走本地 .claude/memory/，仅个人可见
+- 项目记忆（技术决策、踩坑、进展等）-> 走 MCP Memory Server，团队共享
+- 个人偏好（用户习惯、交互风格等）-> 走本地 .claude/memory/，仅个人可见
 
 ---
 
@@ -19,14 +19,14 @@ user_invocable: true
 按以下顺序确定当前项目的 `project_id`：
 
 1. **读 CLAUDE.md**：查找 `## Memory` 段落下的 `project_id` 配置
-   - 找到 → 直接使用，进入阶段二
-   - 没找到 → 继续步骤 2
+   - 找到 -> 直接使用，进入阶段二
+   - 没找到 -> 继续步骤 2
 
 2. **匹配现有项目**：调用 `list_projects` 获取所有项目
    - 用当前目录名、git remote URL、CLAUDE.md 中的项目描述作为线索
    - 与现有项目的 name/description 比对
-   - 匹配到 → 用 AskUserQuestion 确认："当前项目是否为 [项目名]？"
-   - 匹配不到 → 继续步骤 3
+   - 匹配到 -> 用 AskUserQuestion 确认："当前项目是否为 [项目名]？"
+   - 匹配不到 -> 继续步骤 3
 
 3. **创建新项目**：用 AskUserQuestion 询问用户：
    - project_id（英文短标识，如 "dp-pingan"）
@@ -46,17 +46,25 @@ user_invocable: true
 
 项目识别完成后，立即执行：
 
-1. **评估记忆规模**：调用 `count_memories(project_id=当前项目)` 获取记忆总数和分类统计
+1. **评估规模 + 取标题索引**（两个调用并行）：
+   - `count_memories(project_id)` -> 总数 + 分类统计
+   - `get_memory_titles(project_id)` -> 全量标题索引（含 id/title/type/module/tags/access_count，**不含正文和摘要**，体积远小于 index）
+   - ⚠️ 不用 `get_memory_index`：它带 summary，>30 条时易超返回 token 上限导致落盘绕路（实测 85 条 ≈64K 触发落盘）
 
-2. **加载记忆**：根据记忆规模选择策略：
-   - 记忆 ≤ 30 条：调用 `get_module_context(project_id=当前项目, include_all=true)` 加载全文，内部消化，不向用户展示
-   - 记忆 > 30 条：调用 `get_memory_index(project_id=当前项目)` 获取轻量索引（标题+摘要），内部消化，不向用户展示。需要某条记忆的详情时再通过 `get_memory` 或 `search_memory` 按需读取全文
+2. **标题索引内部消化**（不向用户展示）：
+   - 用于"知道有哪些记忆"的全景；它是 search 漏召时的兜底
    - 向用户简要汇报："已加载 N 条项目记忆（decision: X, pitfall: Y, ...）"
 
-3. **检查是否需要睡眠整理**：根据步骤 1 的统计结果判断
-   - 如果项目记忆总数 > 100 条，提醒用户："项目记忆较多（N条），建议执行一次记忆整理。要现在整理吗？"
-   - 用户同意 → 执行阶段四
-   - 用户拒绝 → 正常开始工作
+3. **按需检索（贯穿整个会话）**：
+   - 任务涉及某模块/主题时，用 `search_memory(query, module/type/tags 过滤, limit=10)` 拉相关全文
+   - ⚠️ search 基于关键词匹配，对同义词/概念词会漏召（实测"状态机"查不到"7态设计"）：search 后若凭标题判断可能有遗漏，回查步骤 2 的标题索引，按 id 精确 `get_memory(id)` 补全
+   - 全程不全量加载正文
+
+4. **小项目例外**：记忆 ≤ 30 条时，可直接 `get_module_context(include_all=true)` 一次性加载全文
+
+5. **检查是否需要睡眠整理**：
+   - 项目记忆总数 > 100 条，提醒用户："项目记忆较多（N条），建议执行一次记忆整理。要现在整理吗？"
+   - 用户同意 -> 执行阶段四；拒绝 -> 正常开始工作
 
 ---
 
