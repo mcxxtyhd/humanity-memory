@@ -116,6 +116,64 @@ async def get_project(project_id: str) -> Optional[dict]:
         return await cur.fetchone()
 
 
+async def delete_project(
+    project_id: str,
+    author: str,
+    confirm_name: Optional[str] = None,
+) -> dict:
+    """Delete a project and all its memories (cascade), after echo-name confirmation.
+
+    Requires confirm_name to exactly match the project's name — the
+    "echo the name to delete" guard against accidental deletion by AI callers.
+    Every memory is snapshotted into memory_versions (change_note marks the
+    project deletion) before removal, so the audit trail survives.
+
+    Returns one of:
+        {"status": "not_found"}
+        {"status": "confirmation_required", "project": {...}, "memory_count": N}
+        {"status": "deleted", "project_id": ..., "name": ..., "memories_deleted": N}
+    """
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            "SELECT id, name FROM projects WHERE id = %s", (project_id,)
+        )
+        project = await cur.fetchone()
+        if not project:
+            return {"status": "not_found"}
+
+        if confirm_name != project["name"]:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS count FROM memories WHERE project_id = %s",
+                (project_id,),
+            )
+            count_row = await cur.fetchone()
+            return {
+                "status": "confirmation_required",
+                "project": project,
+                "memory_count": count_row["count"],
+                "hint": 'Re-call with confirm_name="%s" to delete' % project["name"],
+            }
+
+        # Snapshot all memories for audit before deletion (no FK by design)
+        await conn.execute(
+            """INSERT INTO memory_versions (memory_id, title, content, author, change_note)
+               SELECT id, title, content, %s, %s FROM memories WHERE project_id = %s""",
+            (author, "project deleted: %s" % project_id, project_id),
+        )
+        cur = await conn.execute(
+            "DELETE FROM memories WHERE project_id = %s", (project_id,)
+        )
+        memories_deleted = cur.rowcount
+        await conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+        await conn.commit()
+        return {
+            "status": "deleted",
+            "project_id": project_id,
+            "name": project["name"],
+            "memories_deleted": memories_deleted,
+        }
+
+
 # --- Memory operations ---
 
 async def save_memory(

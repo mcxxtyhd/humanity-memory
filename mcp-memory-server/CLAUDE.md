@@ -13,6 +13,7 @@ PostgreSQL + FastMCP 实现的项目记忆存储服务。
 | `count_memories` | 统计记忆数量 |
 | `update_memory` | 更新已有记忆（旧版本自动存档） |
 | `delete_memory` | 删除记忆（删除前存档最终版本） |
+| `delete_project` | 级联删除项目及其所有记忆（需复述项目名确认，删除前全量存档） |
 | `list_projects` | 列出所有项目 |
 
 ## 记忆类型

@@ -303,6 +303,33 @@ async def get_project(project_id: str) -> str:
     return json.dumps(_clean(project), ensure_ascii=False)
 
 
+@mcp.tool()
+async def delete_project(
+    project_id: str,
+    author: str,
+    confirm_name: Optional[str] = None,
+) -> str:
+    """Delete a project and all its memories (cascade).
+
+    Two-step confirmation: calling without a matching confirm_name returns the
+    project info plus the exact name to echo back, and deletes nothing.
+    Deletion only happens when confirm_name exactly matches the project's
+    registered name. All memories are snapshotted into the audit table
+    before deletion.
+
+    Args:
+        project_id: Project identifier
+        author: Who is deleting this project
+        confirm_name: Exact project name — required to actually delete
+    """
+    result = await db.delete_project(
+        project_id=project_id,
+        author=author,
+        confirm_name=confirm_name,
+    )
+    return json.dumps(_clean(result), ensure_ascii=False)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MCP Memory Server")
     parser.add_argument("--host", default=os.environ.get("MCP_HOST", "0.0.0.0"))

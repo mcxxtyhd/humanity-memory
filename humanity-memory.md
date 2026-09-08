@@ -144,3 +144,12 @@ user_invocable: true
 - 记忆的 title 要简短明确，content 要包含 Why 和上下文
 - 不要在一次对话中存储超过 20 条记忆，避免信息过载
 - 整理时要谨慎，不确定是否该删的就保留
+
+## 项目删除（运维操作）
+
+`delete_project(project_id, author, confirm_name)` 级联删除项目及其所有记忆（删除前全量快照进审计表，可恢复）。**仅在用户明确说"删除这个项目"时使用**，日常会话绝不主动触发：
+
+1. 先 `list_projects` / `get_project` 确认目标项目，向用户复述项目名和记忆数，得到确认
+2. 第一次调用 `delete_project` 不带 `confirm_name` → 返回 `confirmation_required` 和确切项目名
+3. 带 `confirm_name=<项目名>`（须与 projects.name 完全一致）再次调用才执行删除
+4. 报告结果：删除的记忆数；提醒用户审计快照保留在 memory_versions，可恢复
