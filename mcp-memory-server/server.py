@@ -164,8 +164,18 @@ async def get_memory_titles(
     project_id: str,
     module: Optional[str] = None,
 ) -> str:
-    """Get lightweight memory list (titles only, no content).
-    Use this instead of get_module_context when you only need an overview.
+    """Get the session-start memory index for a project.
+
+    Returns id/module/title/tags per memory, newest first -- no content, no
+    summary. Use this instead of get_module_context when you only need an
+    overview, or as the fallback when search_memory misses: spot a row by
+    title, then fetch it exactly with get_memory(id).
+
+    The projection is deliberately narrow. `module` and `tags` are kept
+    because search_memory filters on them with EXACT matching, so the exact
+    literals are only learnable from here -- and the `query` path never
+    searches the tags column at all. Type is omitted: it is constrained to
+    five values that the skill file already lists.
 
     Args:
         project_id: Project identifier

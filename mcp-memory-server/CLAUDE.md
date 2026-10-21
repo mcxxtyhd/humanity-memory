@@ -9,7 +9,7 @@ PostgreSQL + FastMCP 实现的项目记忆存储服务。
 | `save_memory` | 保存记忆（相同标题自动更新） |
 | `search_memory` | 按关键词/模块/类型搜索记忆 |
 | `get_module_context` | 加载模块或项目级全部记忆 |
-| `get_memory_titles` | 获取记忆标题列表（轻量） |
+| `get_memory_titles` | 会话启动索引：id/module/title/tags，按更新时间倒序（轻量，无正文） |
 | `count_memories` | 统计记忆数量 |
 | `update_memory` | 更新已有记忆（旧版本自动存档） |
 | `delete_memory` | 删除记忆（删除前存档最终版本） |

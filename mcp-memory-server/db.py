@@ -334,8 +334,7 @@ async def get_memory_index(
     content -- NOT a blind left(content,N) truncation, which duplicated the
     title heading and cut mid-sentence markdown. Redundant fields (project_id,
     author, updated_at, access_count, last_accessed_at) are omitted to keep the
-    payload small; full metadata is available via get_memory_titles, full
-    content via get_memory/get_memories.
+    payload small; full metadata is available via get_memory/get_memories.
     """
     conditions = ["project_id = %s"]
     params: list = [project_id]
@@ -483,8 +482,31 @@ async def get_memory_titles(
     project_id: str,
     module: Optional[str] = None,
 ) -> list[dict]:
-    """Get lightweight memory list (titles only, no content) for a project.
-    When module is omitted, returns all. When provided, filters by module."""
+    """Get lightweight memory list for a project -- the session-start index.
+
+    Projection is deliberately narrow: id, module, title, tags. Every field
+    kept here is one the agent cannot reconstruct without it:
+
+    - id: exact by-id lookup, the fallback when search misses
+    - module: `module = %s` in search_memory is an EXACT match, so the exact
+      module literal is only learnable from this index
+    - tags: the `query` path searches title/content only -- the tags column is
+      NEVER reached by keyword search, only by the exact `tags @> %s` filter.
+      An agent can only use that filter if it has seen the literal here.
+    - title: the human-readable identity of the row
+
+    Deliberately excluded: type (DB-constrained to 5 values that the skill
+    file already documents, so the agent knows the literals without the
+    index), author / created_at / updated_at / access_count /
+    last_accessed_at (pure time+behaviour metadata -- none of them takes
+    part in a recall decision; access_count additionally measures "was
+    returned by a search", not "was useful").
+
+    Ordered by updated_at DESC so the newest memory is first. Ordering by
+    type used to bury a fresh pitfall behind every architecture/convention/
+    decision row, and became an unlabeled grouping once type was dropped
+    from the projection.
+    """
     if module is not None:
         condition = "project_id = %s AND module = %s"
         params = (project_id, module)
@@ -494,10 +516,9 @@ async def get_memory_titles(
 
     async with get_conn() as conn:
         cur = await conn.execute(
-            f"""SELECT id, module, type, title, tags, author,
-                       created_at, updated_at, access_count, last_accessed_at
+            f"""SELECT id, module, title, tags
                 FROM memories WHERE {condition}
-                ORDER BY type, updated_at DESC""",
+                ORDER BY updated_at DESC""",
             params,
         )
         return await cur.fetchall()

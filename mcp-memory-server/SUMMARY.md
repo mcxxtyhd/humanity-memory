@@ -39,18 +39,23 @@
 
 去重机制：project_id + module + type + title（title 规范化后精确匹配）
 
-## MCP 工具接口（8 个）
+## MCP 工具接口（13 个）
 
 | 工具 | 用途 |
 |------|------|
 | save_memory | 保存记忆，相同标题自动 upsert |
 | search_memory | 按关键词/模块/类型搜索，支持中文 |
 | get_module_context | 加载全量记忆（含全文），按 type 分组 |
-| get_memory_titles | 轻量加载（仅标题），记忆多时用这个避免撑爆上下文 |
+| get_memory_titles | 会话启动索引：id/module/title/tags（轻量，无正文/摘要/type），按更新时间倒序 |
+| get_memory_index | 轻量索引 + 结构化摘要，支持 module/type/tags 过滤 |
+| get_memory | 按 id 取单条全文 |
+| get_memories | 按 id 批量取全文 |
 | count_memories | 统计记忆数量，按 type 分组 |
 | update_memory | 更新记忆，自动存版本历史 |
 | delete_memory | 删除记忆，删前存最终版本快照 |
+| delete_project | 级联删除项目及其记忆（需复述项目名确认，删前全量存档） |
 | list_projects | 列出所有项目 |
+| get_project | 按 id 查项目 |
 
 ## Skill 设计（humanity-memory）
 
@@ -60,8 +65,8 @@
 CLAUDE.md 有 project_id → 直接用 → 没有 → list_projects 匹配 → 匹配不到 → 引导创建 → 回写 CLAUDE.md（只需交互一次）
 
 ### 阶段二：记忆召回
-- ≤ 30 条：get_module_context 加载全文
-- \> 30 条：get_memory_titles 只加载标题，按需读全文
+- ≤ 30 条：get_module_context 加载全文，跳过索引
+- \> 30 条：get_memory_titles 加载轻量索引（id/module/title/tags，按更新时间倒序），按需读全文
 - 扫描 shared- 项目备用，不立即加载
 - 记忆 > 100 条时提醒用户整理
 

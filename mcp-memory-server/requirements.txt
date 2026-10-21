@@ -1,5 +1,9 @@
+# Upper bounds are deliberate: the container rebuilds by re-resolving this file,
+# so a `>=`-only line silently pulls in whatever major version PyPI serves at
+# build time. That is how mcp 2.x broke the container on 2026-09-08 (FastMCP
+# was renamed MCPServer). Each bound below caps the next major release.
 mcp>=1.0.0,<2.0.0
-psycopg[binary]>=3.1.0
-psycopg_pool>=3.1.0
-python-dotenv>=1.0.0
-uvicorn>=0.30.0
+psycopg[binary]>=3.1.0,<4.0.0
+psycopg_pool>=3.1.0,<4.0.0
+python-dotenv>=1.0.0,<2.0.0
+uvicorn>=0.30.0,<0.55.0

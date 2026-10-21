@@ -46,21 +46,22 @@ user_invocable: true
 
 项目识别完成后，立即执行：
 
-1. **评估规模 + 取标题索引**（两个调用并行）：
-   - `count_memories(project_id)` -> 总数 + 分类统计
-   - `get_memory_titles(project_id)` -> 全量标题索引（含 id/title/type/module/tags/access_count，**不含正文和摘要**，体积远小于 index）
+1. **评估规模**：`count_memories(project_id)` -> 总数 + 分类统计
+
+2. **按规模分支加载**（这一步决定了后面是"索引"还是"全文"，不要两个都拉）：
+   - **≤ 30 条（小项目）**：直接 `get_module_context(include_all=true)` 一次性加载全文，**跳过标题索引**。全文行的字段是索引的超集，先拉索引再拉全文是纯冗余。
+   - **> 30 条（大项目）**：`get_memory_titles(project_id)` -> 轻量索引（含 id/module/title/tags，**不含正文、摘要、type**，体积远小于 index）
    - ⚠️ 不用 `get_memory_index`：它带 summary，>30 条时易超返回 token 上限导致落盘绕路（实测 85 条 ≈64K 触发落盘）
 
-2. **标题索引内部消化**（不向用户展示）：
-   - 用于"知道有哪些记忆"的全景；它是 search 漏召时的兜底
-   - 向用户简要汇报："已加载 N 条项目记忆（decision: X, pitfall: Y, ...）"
+3. **索引/全文内部消化**（不向用户展示）：
+   - 用于"知道有哪些记忆"的全景；大项目时它还是 search 漏召时的兜底
+   - `module` 和 `tags` 必须留在索引里：search_memory 对它们是**精确匹配**（`module = %s` / `tags @> %s`），确切字面量只能从索引学到；且 `query` 路径根本不搜 tags 列——只靠 tag 记住的记忆，索引是它唯一的入口
+   - 向用户简要汇报："已加载 N 条项目记忆（decision: X, pitfall: Y, ...）"（分类统计来自 count_memories）
 
-3. **按需检索（贯穿整个会话）**：
+4. **按需检索（贯穿整个会话）**：
    - 任务涉及某模块/主题时，用 `search_memory(query, module/type/tags 过滤, limit=10)` 拉相关全文
-   - ⚠️ search 基于关键词匹配，对同义词/概念词会漏召（实测"状态机"查不到"7态设计"）：search 后若凭标题判断可能有遗漏，回查步骤 2 的标题索引，按 id 精确 `get_memory(id)` 补全
+   - ⚠️ search 基于关键词匹配，对同义词/概念词会漏召（实测"状态机"查不到"7态设计"）：search 后若凭标题判断可能有遗漏，回查步骤 2 的索引，按 id 精确 `get_memory(id)` 补全（小项目已加载全文，不存在遗漏）
    - 全程不全量加载正文
-
-4. **小项目例外**：记忆 ≤ 30 条时，可直接 `get_module_context(include_all=true)` 一次性加载全文
 
 5. **检查是否需要睡眠整理**：
    - 项目记忆总数 > 100 条，提醒用户："项目记忆较多（N条），建议执行一次记忆整理。要现在整理吗？"
@@ -150,6 +151,6 @@ user_invocable: true
 `delete_project(project_id, author, confirm_name)` 级联删除项目及其所有记忆（删除前全量快照进审计表，可恢复）。**仅在用户明确说"删除这个项目"时使用**，日常会话绝不主动触发：
 
 1. 先 `list_projects` / `get_project` 确认目标项目，向用户复述项目名和记忆数，得到确认
-2. 第一次调用 `delete_project` 不带 `confirm_name` → 返回 `confirmation_required` 和确切项目名
+2. 第一次调用 `delete_project` 不带 `confirm_name` -> 返回 `confirmation_required` 和确切项目名
 3. 带 `confirm_name=<项目名>`（须与 projects.name 完全一致）再次调用才执行删除
 4. 报告结果：删除的记忆数；提醒用户审计快照保留在 memory_versions，可恢复
